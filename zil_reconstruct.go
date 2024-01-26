@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	//"github.com/Zilliqa/gozilliqa-sdk/v3/account"
 	"github.com/Zilliqa/gozilliqa-sdk/v3/core"
@@ -79,10 +80,17 @@ func ZilReconstructGenesisHeader(inFile string, ouFile string, srcTxBlockNum int
 
 	// OK. We now have the block number and ds committee.
 	var dsComm *list.List
-	dsComm = list.New()
-	for _, ds := range dsCommInput.DsComm {
-		dsComm.PushBack(ds)
+	dscValid := make(map[int]bool)
+	{
+		idx := 0
+		dsComm = list.New()
+		for _, ds := range dsCommInput.DsComm {
+			dsComm.PushBack(ds)
+			dscValid[idx] = true
+			idx++
+		}
 	}
+
 	zilSdk := provider.NewProvider(apiUrl)
 	// We need the current DS Committee because we need to know the number of DSGuards
 	// we assume that the number of DS guards stays the same throughout the roll.
@@ -153,7 +161,7 @@ func ZilReconstructGenesisHeader(inFile string, ouFile string, srcTxBlockNum int
 				curLink = curLink.Next()
 			}
 
-			newDsList, err2 := verifier.VerifyDsBlock(nextDsBlock, nextDsBlockDecoded, dsComm)
+			newDsList, err2 := verifier.VerifyDsBlock(nextDsBlock, nextDsBlockDecoded, dsComm, &dscValid)
 			if err2 != nil {
 				panic(fmt.Errorf("Cannot advance DS block past %d - %v", nextDsBlock, err2))
 			}
@@ -241,8 +249,8 @@ func ZilReconstructGenesisHeader(inFile string, ouFile string, srcTxBlockNum int
 		targetTxBlockNum, targetDsBlockNum, outFile)
 }
 
-func (v *Verifier) AggregatedPubKeyFromDsComm(dsComm *list.List, dsBlock *core.DsBlock) ([]byte, error) {
-	pubKeys, err := v.generateDsCommArray(dsComm, dsBlock)
+func (v *Verifier) AggregatedPubKeyFromDsComm(dsComm *list.List, dsBlock *core.DsBlock, dscValid *map[int]bool) ([]byte, error) {
+	pubKeys, err := v.generateDsCommArray(dsComm, dsBlock, dscValid)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +274,7 @@ func (v *Verifier) AggregatedPubKeyFromTxComm(dsComm *list.List, txBlock *core.T
 }
 
 // abstract this two methods
-func (v *Verifier) generateDsCommArray(dsComm *list.List, dsBlock *core.DsBlock) ([][]byte, error) {
+func (v *Verifier) generateDsCommArray(dsComm *list.List, dsBlock *core.DsBlock, dscValid *map[int]bool) ([][]byte, error) {
 	if dsComm.Len() != len(dsBlock.Cosigs.B2) {
 		return nil, errors.New(fmt.Sprintf("ds list mismatch - expected %d from cosigs, got %d from current estimate", len(dsBlock.Cosigs.B2), dsComm.Len()))
 	}
@@ -294,6 +302,7 @@ func (v *Verifier) generateDsCommArray(dsComm *list.List, dsBlock *core.DsBlock)
 	for index, key := range commKeys {
 		if bitmap[index] {
 			pubKeys = append(pubKeys, zilutil.DecodeHex(key))
+			(*dscValid)[index] = true
 		} else {
 			fmt.Printf("^[%d] ", index)
 		}
@@ -337,8 +346,8 @@ func (v *Verifier) generateDsCommArray2(dsComm *list.List, txBlock *core.TxBlock
 // 0. verify current ds block
 // 2. generate next ds committee
 // return new ds comm
-func (v *Verifier) VerifyDsBlock(origDsBlock *core.DsBlockT, dsBlock *core.DsBlock, dsComm *list.List) (*list.List, error) {
-	newDsComm, err2 := v.UpdateDSCommitteeComposition("", dsComm, origDsBlock, dsBlock)
+func (v *Verifier) VerifyDsBlock(origDsBlock *core.DsBlockT, dsBlock *core.DsBlock, dsComm *list.List, dscValid *map[int]bool) (*list.List, error) {
+	newDsComm, err2 := v.UpdateDSCommitteeComposition("", dsComm, origDsBlock, dsBlock, dscValid)
 	if err2 != nil {
 		return nil, err2
 	}
@@ -358,16 +367,16 @@ func (v *Verifier) VerifyTxBlock(txBlock *core.TxBlock, dsComm *list.List) error
 	return nil
 }
 
-func (v *Verifier) UpdateDSCommitteeComposition(selfKeyPub string, dsComm *list.List, origDsBlock *core.DsBlockT, dsBlock *core.DsBlock) (*list.List, error) {
+func (v *Verifier) UpdateDSCommitteeComposition(selfKeyPub string, dsComm *list.List, origDsBlock *core.DsBlockT, dsBlock *core.DsBlock, dscValid *map[int]bool) (*list.List, error) {
 	var dummy core.MinerInfoDSComm
-	return v.updateDSCommitteeComposition(selfKeyPub, dsComm, origDsBlock, dsBlock, dummy)
+	return v.updateDSCommitteeComposition(selfKeyPub, dsComm, origDsBlock, dsBlock, dummy, dscValid)
 }
 
 // inner type of dsComm is core.PairOfNode
 func (v *Verifier) updateDSCommitteeComposition(selfKeyPub string, dsComm *list.List, origDsBlock *core.DsBlockT,
-	dsBlock *core.DsBlock, info core.MinerInfoDSComm) (*list.List, error) {
+	dsBlock *core.DsBlock, info core.MinerInfoDSComm, dscValid *map[int]bool) (*list.List, error) {
 
-	fmt.Printf("-- DS Committee --")
+	fmt.Printf("-- DS Committee --\n")
 	{
 		var elem *list.Element
 		var idx int
@@ -390,8 +399,24 @@ func (v *Verifier) updateDSCommitteeComposition(selfKeyPub string, dsComm *list.
 	}
 	fmt.Printf("----\n")
 
+	var oldDsComm *list.List
+	oldDsComm = list.New()
+	{
+		var elem *list.Element
+		elem = dsComm.Front()
+		for {
+			if elem == nil {
+				break
+			}
+			oldDsComm.PushBack(elem.Value)
+			elem = elem.Next()
+		}
+	}
+
 	// 0. verify ds block first
-	aggregatedPubKey, err := v.AggregatedPubKeyFromDsComm(dsComm, dsBlock)
+	validationOK := false
+	useDsc := make(map[int]bool)
+	aggregatedPubKey, err := v.AggregatedPubKeyFromDsComm(dsComm, dsBlock, &useDsc)
 	if err != nil {
 		return nil, err
 	}
@@ -399,12 +424,21 @@ func (v *Verifier) updateDSCommitteeComposition(selfKeyPub string, dsComm *list.
 	r, s := dsBlock.GetRandS()
 
 	fmt.Printf("headerBytes: %s\n", hex.EncodeToString(headerBytes))
+	var setVal bool
 	if !multisig.MultiVerify(aggregatedPubKey, headerBytes, r, s) {
 		msg := fmt.Sprintf("verify ds block %d error - multisig does not check out for this DS committee", dsBlock.BlockHeader.BlockNum)
 		fmt.Println(msg)
+		// We failed to verify. One of the vectors must be bad.
+		setVal = false
 		// return nil, errors.New(msg)
 	} else {
 		fmt.Printf("+++ verify ds %s block OK\n", origDsBlock.Header.BlockNum)
+		setVal = true
+		validationOK = true
+	}
+	for key, _ := range useDsc {
+		//fmt.Printf(" => [%d] = %v\n", key, setVal)
+		(*dscValid)[key] = setVal
 	}
 
 	// 1. get the map of all pow winners from the DS block
@@ -419,13 +453,17 @@ func (v *Verifier) updateDSCommitteeComposition(selfKeyPub string, dsComm *list.
 		current := dsComm.Front()
 		for current != nil {
 			pairOfNode := current.Value.(core.PairOfNode)
-			if pairOfNode.PubKey == removed {
+			if strings.ToLower(pairOfNode.PubKey) == strings.ToLower(removed) {
 				break
 			}
 			current = current.Next()
 		}
 		if current != nil {
 			dsComm.MoveToBack(current)
+			fmt.Printf("DS Committee Member %v moved to back\n", removed)
+		} else {
+			fmt.Printf("Non-DS Committee member %v in removeDSNodePubkeys - ignoring it\n",
+				removed)
 		}
 	}
 
@@ -443,6 +481,7 @@ func (v *Verifier) updateDSCommitteeComposition(selfKeyPub string, dsComm *list.
 			count--
 			cursor = cursor.Next()
 		}
+		fmt.Printf("Node to add: adding %v", w)
 		if cursor == nil {
 			// The end of the list!
 			dsComm.PushBack(w)
@@ -454,7 +493,55 @@ func (v *Verifier) updateDSCommitteeComposition(selfKeyPub string, dsComm *list.
 	// 5. remove one node for every winner, maintaining the size of the DS Committee
 	for i := 0; i < numOfWinners; i++ {
 		back := dsComm.Back()
+		fmt.Printf("Removing back of list for winner %d", i)
 		dsComm.Remove(back)
+	}
+
+	// Tell us what was updated and set its validation vector to false
+	{
+		var idx int
+		var elem1 *list.Element
+		var elem2 *list.Element
+		elem1 = oldDsComm.Front()
+		elem2 = dsComm.Front()
+
+		var i int
+		for i = 0; i < dsComm.Len(); i++ {
+			val, ok := (*dscValid)[i]
+			if ok && val {
+				fmt.Printf("-")
+			} else {
+				fmt.Printf("^")
+			}
+		}
+		fmt.Printf("\n")
+		idx = 0
+		for {
+			if elem1 == nil {
+				break
+			}
+			p1 := elem1.Value.(core.PairOfNode).PubKey
+			p2 := elem2.Value.(core.PairOfNode).PubKey
+			if p1 != p2 {
+				fmt.Printf("** Idx %d %s -> %s : invalidating\n",
+					idx, p1, p2)
+				(*dscValid)[idx] = false
+			}
+			elem1 = elem1.Next()
+			elem2 = elem2.Next()
+			idx++
+		}
+
+		for i = 0; i < dsComm.Len(); i++ {
+			val, ok := (*dscValid)[i]
+			if ok && val {
+				fmt.Printf(".")
+			} else {
+				fmt.Printf("*")
+			}
+		}
+		fmt.Printf("\n")
+		fmt.Printf("Validation %v\n", validationOK)
 	}
 
 	return dsComm, nil
