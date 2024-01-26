@@ -15,6 +15,8 @@ import (
 	"github.com/Zilliqa/gozilliqa-sdk/v3/multisig"
 	"github.com/Zilliqa/gozilliqa-sdk/v3/provider"
 	zilutil "github.com/Zilliqa/gozilliqa-sdk/v3/util"
+
+	"encoding/hex"
 )
 
 type Verifier struct {
@@ -292,8 +294,11 @@ func (v *Verifier) generateDsCommArray(dsComm *list.List, dsBlock *core.DsBlock)
 	for index, key := range commKeys {
 		if bitmap[index] {
 			pubKeys = append(pubKeys, zilutil.DecodeHex(key))
+		} else {
+			fmt.Printf("^[%d] ", index)
 		}
 	}
+	fmt.Printf("\n")
 	return pubKeys, nil
 }
 
@@ -361,6 +366,30 @@ func (v *Verifier) UpdateDSCommitteeComposition(selfKeyPub string, dsComm *list.
 // inner type of dsComm is core.PairOfNode
 func (v *Verifier) updateDSCommitteeComposition(selfKeyPub string, dsComm *list.List, origDsBlock *core.DsBlockT,
 	dsBlock *core.DsBlock, info core.MinerInfoDSComm) (*list.List, error) {
+
+	fmt.Printf("-- DS Committee --")
+	{
+		var elem *list.Element
+		var idx int
+		idx = 0
+		elem = dsComm.Front()
+		for {
+			if elem == nil {
+				break
+			}
+			fmt.Printf("[%d] : %s\n", idx, elem.Value.(core.PairOfNode).PubKey)
+			idx = idx + 1
+			elem = elem.Next()
+		}
+	}
+	for idx, val := range origDsBlock.Header.PoWWinners {
+		fmt.Printf("+ [%d] %s\n", idx, val)
+	}
+	for idx, val := range dsBlock.BlockHeader.RemoveDSNodePubKeys {
+		fmt.Printf("- [%d] %s\n", idx, val)
+	}
+	fmt.Printf("----\n")
+
 	// 0. verify ds block first
 	aggregatedPubKey, err := v.AggregatedPubKeyFromDsComm(dsComm, dsBlock)
 	if err != nil {
@@ -369,6 +398,7 @@ func (v *Verifier) updateDSCommitteeComposition(selfKeyPub string, dsComm *list.
 	headerBytes := dsBlock.Serialize()
 	r, s := dsBlock.GetRandS()
 
+	fmt.Printf("headerBytes: %s\n", hex.EncodeToString(headerBytes))
 	if !multisig.MultiVerify(aggregatedPubKey, headerBytes, r, s) {
 		msg := fmt.Sprintf("verify ds block %d error - multisig does not check out for this DS committee", dsBlock.BlockHeader.BlockNum)
 		return nil, errors.New(msg)
