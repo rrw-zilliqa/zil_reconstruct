@@ -229,7 +229,21 @@ func ZilReconstructGenesisHeader(inFile string, ouFile string, srcTxBlockNum int
 		if elem == nil {
 			break
 		}
-		dsCommArr = append(dsCommArr, elem.Value.(core.PairOfNode))
+		// DANGER WILL ROBINSON!
+		// gozilliqa compares keys by literal string value against the values retrieved from the blockchain
+		// values retrieved from the blockchain are upper-case with a leading 0x. If you don't force them
+		// to have this format when you save them, they will not compare properly, we will believe all
+		// to-be-removed keys are not in the DS committee (because they are upper-case and some of the
+		// elements we put in the DSC wil be lower-case) and DSC tracking will fail. Since it is impossible
+		// to fix the SDK (it is pinned in eg. ZilBridge), we must ensure here that output keys
+		// are in the right format. Ugh! - rrw 2024-01-27
+		value := elem.Value.(core.PairOfNode)
+		if value.PubKey[:2] != "0x" {
+			panic(fmt.Errorf("DS committee member %s does not start with 0x, but %s- see comment above this source position!",
+				value.PubKey, value.PubKey[:2]))
+		}
+		value.PubKey = "0x" + strings.ToUpper(value.PubKey[2:])
+		dsCommArr = append(dsCommArr, value)
 		elem = elem.Next()
 	}
 	txBlockAndDsComm := TxBlockAndDsComm{
